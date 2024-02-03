@@ -9,7 +9,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 const percentile = 80
@@ -37,12 +37,10 @@ type handlerCtx struct {
 	longPooling     bool
 	maxFailedTries  int
 	openStateExpiry time.Duration
-
-	log *zap.SugaredLogger
 }
 
-func New(longPooling bool, maxFailedTries int, openStateExpiry time.Duration, log *zap.SugaredLogger) *handlerCtx {
-	return &handlerCtx{httpClient: http.DefaultClient, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry, log: log}
+func New(longPooling bool, maxFailedTries int, openStateExpiry time.Duration) *handlerCtx {
+	return &handlerCtx{httpClient: http.DefaultClient, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry}
 }
 
 func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, request *http.Request) {
@@ -66,7 +64,7 @@ func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, request *http.Requ
 	switch host.State {
 	case StateOpen:
 		hc.fail(writer, request)
-		hc.log.Infow("circuit-breaker: attempt failed", "host", request.URL.Host, "state", host.State)
+		slog.Info("circuit-breaker: attempt failed", "host", request.URL.Host, "state", host.State)
 	case StateClosed, StateHalfOpen:
 		resp := hc.proxy(request)
 		hc.updateHostStatus(host, resp)
@@ -81,7 +79,7 @@ func (hc *handlerCtx) fail(writer http.ResponseWriter, request *http.Request) {
 	timeout := fetchTimeout(request.Header)
 	if hc.longPooling && timeout > 0 {
 		// Long pooling
-		hc.log.Infow("circuit-breaker: hold", "host", request.URL.Host, "timeout", timeout)
+		slog.Info("circuit-breaker: hold", "host", request.URL.Host, "timeout", timeout)
 		<-time.After((timeout * percentile) / 100)
 	}
 	writer.WriteHeader(http.StatusServiceUnavailable)
@@ -101,7 +99,7 @@ func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
 	if err != nil {
 		log.Fatal(err)
 	}
-	hc.log.Infow("circuit-breaker: received response", "host", request.URL.Host, "status", resp.Status)
+	slog.Info("circuit-breaker: received response", "host", request.URL.Host, "status", resp.Status)
 
 	return resp
 }
@@ -116,7 +114,7 @@ func (hc *handlerCtx) updateHostStatus(host Host, response *http.Response) {
 		if !isRequestSuccessful {
 			host.FailuresCount++
 			if host.FailuresCount >= hc.maxFailedTries {
-				hc.log.Infow("circuit-breaker: becoming open", "host", host.ID, "failureCount", host.FailuresCount)
+				slog.Info("circuit-breaker: becoming open", "host", host.ID, "failureCount", host.FailuresCount)
 				host.State = StateOpen
 				host.OpenExpiresAt = time.Now().Add(hc.openStateExpiry)
 			}
@@ -125,7 +123,7 @@ func (hc *handlerCtx) updateHostStatus(host Host, response *http.Response) {
 		if isRequestSuccessful {
 			host.FailuresCount--
 			if host.FailuresCount == 0 {
-				hc.log.Infow("circuit-breaker: becoming closed", "host", host.ID)
+				slog.Info("circuit-breaker: becoming closed", "host", host.ID)
 				host.State = StateClosed
 			}
 		} else {
