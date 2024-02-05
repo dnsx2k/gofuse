@@ -1,10 +1,12 @@
 module github.com/dnsx2k/circuit-breaker
 
-go 1.19
+go 1.21
+
+toolchain go1.21.6
 
 require (
-	github.com/ardanlabs/conf v1.5.0
 	github.com/hashicorp/golang-lru/v2 v2.0.1
+	github.com/sethvargo/go-envconfig v1.0.0
 	go.uber.org/automaxprocs v1.5.1
 )
 

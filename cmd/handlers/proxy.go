@@ -30,10 +30,8 @@ const (
 )
 
 type handlerCtx struct {
-	httpClient *http.Client
-	// change cache
-	lru *lru.Cache[string, Host]
-
+	httpClient      *http.Client
+	lru             *lru.Cache[string, Host]
 	longPooling     bool
 	maxFailedTries  int
 	openStateExpiry time.Duration
@@ -43,30 +41,28 @@ func New(longPooling bool, maxFailedTries int, openStateExpiry time.Duration) *h
 	return &handlerCtx{httpClient: http.DefaultClient, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry}
 }
 
-func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, request *http.Request) {
-	// Why we need this? Maybe add request-id to logs
-	rID := request.Header.Get("X-Request-ID")
-	if rID == "" {
-		rID = "unable-to-correlate"
-	}
+//// Why we need this? Maybe add request-id to logs
+//	rID := request.Header.Get("X-Request-ID")
+//	if rID == "" {
+//		rID = "unable-to-correlate"
+//	}
 
-	host, knownHost := hc.lru.Get(request.URL.Host)
-	if !knownHost {
-		host.ID = request.URL.Host
+func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, req *http.Request) {
+	host, ok := hc.lru.Get(req.URL.Host)
+	if !ok {
+		host.ID = req.URL.Host
 		host.State = StateClosed
 	}
 	if host.State == StateOpen && time.Now().After(host.OpenExpiresAt) {
 		host.State = StateHalfOpen
 	}
 
-	//hc.log.Infow("circuit-breaker", "host", request.URL.Host, "state", host.State, "failureCount", host.FailuresCount)
-
 	switch host.State {
 	case StateOpen:
-		hc.fail(writer, request)
-		slog.Info("circuit-breaker: attempt failed", "host", request.URL.Host, "state", host.State)
+		hc.fail(writer, req)
+		slog.Info("circuit-breaker: attempt failed", "host", req.URL.Host, "state", host.State)
 	case StateClosed, StateHalfOpen:
-		resp := hc.proxy(request)
+		resp := hc.proxy(req)
 		hc.updateHostStatus(host, resp)
 		if resp.StatusCode < 500 {
 			hc.rewrite(writer, resp)
@@ -75,15 +71,15 @@ func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, request *http.Requ
 }
 
 // TODO: Mention long-pooling feature in README.md
-func (hc *handlerCtx) fail(writer http.ResponseWriter, request *http.Request) {
-	timeout := fetchTimeout(request.Header)
+func (hc *handlerCtx) fail(writer http.ResponseWriter, req *http.Request) {
+	timeout := fetchTimeout(req.Header)
 	if hc.longPooling && timeout > 0 {
 		// Long pooling
-		slog.Info("circuit-breaker: hold", "host", request.URL.Host, "timeout", timeout)
+		slog.Info("circuit-breaker: hold", "host", req.URL.Host, "timeout", timeout)
 		<-time.After((timeout * percentile) / 100)
 	}
 	writer.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":circuit-breaker open for host: %s}", request.URL.Host)))
+	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":circuit-breaker open for host: %s}", req.URL.Host)))
 }
 
 func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
