@@ -12,7 +12,7 @@ type CircuitBreakerRoundTripper struct {
 }
 
 // RoundTrip - implementation of round tripper interface, saves origin protocol, then forces http between host and
-// circuit-breaker pod. Adds request timeout header.
+// gofuse pod. Adds request timeout header.
 func (rt *CircuitBreakerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Request-Timeout", rt.RequestTimeout)
 	req.Header.Set("X-Forwarded-Proto", req.URL.Scheme)
@@ -20,7 +20,7 @@ func (rt *CircuitBreakerRoundTripper) RoundTrip(req *http.Request) (*http.Respon
 	return rt.DefaultTransport.RoundTrip(req)
 }
 
-// DefaultHTTPClient - returns default http.Client with circuit-breaker custom round tripper extension builtin
+// DefaultHTTPClient - returns default http.Client with gofuse custom round tripper extension builtin
 func DefaultHTTPClient(localTimeout time.Duration, reqTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: NewCircuitBreakerRT(reqTimeout),
@@ -28,7 +28,7 @@ func DefaultHTTPClient(localTimeout time.Duration, reqTimeout time.Duration) *ht
 	}
 }
 
-// NewCircuitBreakerRT - returns custom round-tripper, that enables communication with circuit-breaker
+// NewCircuitBreakerRT - returns custom round-tripper, that enables communication with gofuse
 func NewCircuitBreakerRT(timeout time.Duration) *CircuitBreakerRoundTripper {
 	return &CircuitBreakerRoundTripper{
 		DefaultTransport: http.DefaultTransport,

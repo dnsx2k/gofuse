@@ -1,4 +1,4 @@
-module github.com/dnsx2k/circuit-breaker
+module github.com/dnsx2k/gofuse
 
 go 1.21
 

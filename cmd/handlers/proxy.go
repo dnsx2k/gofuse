@@ -38,7 +38,8 @@ type handlerCtx struct {
 }
 
 func New(longPooling bool, maxFailedTries int, openStateExpiry time.Duration) *handlerCtx {
-	return &handlerCtx{httpClient: http.DefaultClient, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry}
+	lru, _ := lru.New[string, Host](100)
+	return &handlerCtx{httpClient: http.DefaultClient, lru: lru, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry}
 }
 
 //// Why we need this? Maybe add request-id to logs
@@ -60,7 +61,7 @@ func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, req *http.Request)
 	switch host.State {
 	case StateOpen:
 		hc.fail(writer, req)
-		slog.Info("circuit-breaker: attempt failed", "host", req.URL.Host, "state", host.State)
+		slog.Info("gofuse: attempt failed", "host", req.URL.Host, "state", host.State)
 	case StateClosed, StateHalfOpen:
 		resp := hc.proxy(req)
 		hc.updateHostStatus(host, resp)
@@ -75,11 +76,11 @@ func (hc *handlerCtx) fail(writer http.ResponseWriter, req *http.Request) {
 	timeout := fetchTimeout(req.Header)
 	if hc.longPooling && timeout > 0 {
 		// Long pooling
-		slog.Info("circuit-breaker: hold", "host", req.URL.Host, "timeout", timeout)
+		slog.Info("gofuse: hold", "host", req.URL.Host, "timeout", timeout)
 		<-time.After((timeout * percentile) / 100)
 	}
 	writer.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":circuit-breaker open for host: %s}", req.URL.Host)))
+	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":gofuse open for host: %s}", req.URL.Host)))
 }
 
 func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
@@ -95,7 +96,7 @@ func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
 	if err != nil {
 		log.Fatal(err)
 	}
-	slog.Info("circuit-breaker: received response", "host", request.URL.Host, "status", resp.Status)
+	slog.Info("gofuse: received response", "host", request.URL.Host, "status", resp.Status)
 
 	return resp
 }
@@ -110,7 +111,7 @@ func (hc *handlerCtx) updateHostStatus(host Host, response *http.Response) {
 		if !isRequestSuccessful {
 			host.FailuresCount++
 			if host.FailuresCount >= hc.maxFailedTries {
-				slog.Info("circuit-breaker: becoming open", "host", host.ID, "failureCount", host.FailuresCount)
+				slog.Info("gofuse: becoming open", "host", host.ID, "failureCount", host.FailuresCount)
 				host.State = StateOpen
 				host.OpenExpiresAt = time.Now().Add(hc.openStateExpiry)
 			}
@@ -119,7 +120,7 @@ func (hc *handlerCtx) updateHostStatus(host Host, response *http.Response) {
 		if isRequestSuccessful {
 			host.FailuresCount--
 			if host.FailuresCount == 0 {
-				slog.Info("circuit-breaker: becoming closed", "host", host.ID)
+				slog.Info("gofuse: becoming closed", "host", host.ID)
 				host.State = StateClosed
 			}
 		} else {
@@ -134,7 +135,7 @@ func (hc *handlerCtx) rewrite(writer http.ResponseWriter, response *http.Respons
 	for k, v := range response.Header {
 		writer.Header()[k] = v
 	}
-	writer.Header()["Via"] = []string{"circuit-breaker"}
+	writer.Header()["Via"] = []string{"gofuse"}
 
 	bytes, err := io.ReadAll(response.Body)
 	defer func(Body io.ReadCloser) {
