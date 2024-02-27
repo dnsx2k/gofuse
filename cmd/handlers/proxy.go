@@ -71,7 +71,6 @@ func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, req *http.Request)
 	}
 }
 
-// TODO: Mention long-pooling feature in README.md
 func (hc *handlerCtx) fail(writer http.ResponseWriter, req *http.Request) {
 	timeout := fetchTimeout(req.Header)
 	if hc.longPooling && timeout > 0 {

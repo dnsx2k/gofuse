@@ -1,5 +1,10 @@
 ![gofuse.png](docs%2Fgofuse.png)
 
+### To do:
+- Configuration for known hosts (long-pooling option, rps limit etc) + default when no configured
+- Respect max rps feature
+- Metrics
+
 # [WIP] GoFuse - circuit-breaker sidecar
 
 ![circuit-breaker.drawio.png](docs%2Fcircuit-breaker.drawio.png)
