@@ -4,65 +4,42 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
+	"github.com/dnsx2k/gofuse/pkg/circuitbreaker"
+	"github.com/dnsx2k/gofuse/pkg/settings"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"log/slog"
 )
 
 const percentile = 80
 
-type Host struct {
-	ID            string
-	State         State
-	OpenExpiresAt time.Time
-	FailuresCount int
-}
-
-type State string
-
-const (
-	StateClosed   State = "closed"
-	StateOpen           = "open"
-	StateHalfOpen       = "half-open"
-)
-
 type handlerCtx struct {
-	httpClient      *http.Client
-	lru             *lru.Cache[string, Host]
-	longPooling     bool
-	maxFailedTries  int
-	openStateExpiry time.Duration
+	httpClient *http.Client
+	lru        *lru.Cache[string, circuitbreaker.Host]
+	settings   map[string]settings.ClientConfiguration
 }
 
-func New(longPooling bool, maxFailedTries int, openStateExpiry time.Duration) *handlerCtx {
-	lru, _ := lru.New[string, Host](100)
-	return &handlerCtx{httpClient: http.DefaultClient, lru: lru, longPooling: longPooling, maxFailedTries: maxFailedTries, openStateExpiry: openStateExpiry}
+func New(settings map[string]settings.ClientConfiguration) *handlerCtx {
+	lru, _ := lru.New[string, circuitbreaker.Host](100)
+	return &handlerCtx{httpClient: http.DefaultClient, lru: lru, settings: settings}
 }
-
-//// Why we need this? Maybe add request-id to logs
-//	rID := request.Header.Get("X-Request-ID")
-//	if rID == "" {
-//		rID = "unable-to-correlate"
-//	}
 
 func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, req *http.Request) {
 	host, ok := hc.lru.Get(req.URL.Host)
 	if !ok {
-		host.ID = req.URL.Host
-		host.State = StateClosed
+		host = hc.getHostWithSettings(req.URL.Host)
 	}
-	if host.State == StateOpen && time.Now().After(host.OpenExpiresAt) {
-		host.State = StateHalfOpen
+	if host.State == circuitbreaker.StateOpen && time.Now().After(host.OpenExpiresAt) {
+		host.State = circuitbreaker.StateHalfOpen
 	}
 
 	switch host.State {
-	case StateOpen:
-		hc.fail(writer, req)
+	case circuitbreaker.StateOpen:
+		hc.fail(writer, host)
 		slog.Info("gofuse: attempt failed", "host", req.URL.Host, "state", host.State)
-	case StateClosed, StateHalfOpen:
+	case circuitbreaker.StateClosed, circuitbreaker.StateHalfOpen:
 		resp := hc.proxy(req)
 		hc.updateHostStatus(host, resp)
 		if resp.StatusCode < 500 {
@@ -71,15 +48,15 @@ func (hc *handlerCtx) PassThrough(writer http.ResponseWriter, req *http.Request)
 	}
 }
 
-func (hc *handlerCtx) fail(writer http.ResponseWriter, req *http.Request) {
-	timeout := fetchTimeout(req.Header)
-	if hc.longPooling && timeout > 0 {
+func (hc *handlerCtx) fail(writer http.ResponseWriter, host circuitbreaker.Host) {
+	timeout := host.Settings.Timeout
+	if host.Settings.LongPooling && timeout > 0 {
 		// Long pooling
-		slog.Info("gofuse: hold", "host", req.URL.Host, "timeout", timeout)
+		slog.Info("gofuse: hold", "host", host.ID, "timeout", timeout)
 		<-time.After((timeout * percentile) / 100)
 	}
 	writer.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":gofuse open for host: %s}", req.URL.Host)))
+	_, _ = writer.Write([]byte(fmt.Sprintf("{\"error\":gofuse open for host: %s}", host.ID)))
 }
 
 func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
@@ -100,31 +77,43 @@ func (hc *handlerCtx) proxy(request *http.Request) *http.Response {
 	return resp
 }
 
-func (hc *handlerCtx) updateHostStatus(host Host, response *http.Response) {
+func (hc *handlerCtx) getHostWithSettings(host string) circuitbreaker.Host {
+	settings, ok := hc.settings[host]
+	if !ok {
+		settings = hc.settings["default"]
+	}
+	return circuitbreaker.Host{
+		ID:       host,
+		State:    circuitbreaker.StateClosed,
+		Settings: &settings,
+	}
+}
+
+func (hc *handlerCtx) updateHostStatus(host circuitbreaker.Host, response *http.Response) {
 	isRequestSuccessful := response.StatusCode < 500
 	switch host.State {
-	case StateClosed:
+	case circuitbreaker.StateClosed:
 		if isRequestSuccessful && host.FailuresCount > 0 {
 			host.FailuresCount--
 		}
 		if !isRequestSuccessful {
 			host.FailuresCount++
-			if host.FailuresCount >= hc.maxFailedTries {
+			if host.FailuresCount >= host.Settings.MaxFailedTries {
 				slog.Info("gofuse: becoming open", "host", host.ID, "failureCount", host.FailuresCount)
-				host.State = StateOpen
-				host.OpenExpiresAt = time.Now().Add(hc.openStateExpiry)
+				host.State = circuitbreaker.StateOpen
+				host.OpenExpiresAt = time.Now().Add(host.Settings.OpenTTL)
 			}
 		}
-	case StateHalfOpen:
+	case circuitbreaker.StateHalfOpen:
 		if isRequestSuccessful {
 			host.FailuresCount--
 			if host.FailuresCount == 0 {
 				slog.Info("gofuse: becoming closed", "host", host.ID)
-				host.State = StateClosed
+				host.State = circuitbreaker.StateClosed
 			}
 		} else {
-			host.State = StateOpen
-			host.OpenExpiresAt = time.Now().Add(hc.openStateExpiry)
+			host.State = circuitbreaker.StateOpen
+			host.OpenExpiresAt = time.Now().Add(host.Settings.OpenTTL)
 		}
 	}
 	hc.lru.Add(host.ID, host)
@@ -148,17 +137,4 @@ func (hc *handlerCtx) rewrite(writer http.ResponseWriter, response *http.Respons
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func fetchTimeout(header http.Header) time.Duration {
-	val, ok := header["Request-Timeout"]
-	if !ok || len(val) == 0 {
-		return 0
-	}
-	tm := val[0]
-	tmNum, err := strconv.Atoi(tm)
-	if err != nil {
-		return 0
-	}
-	return time.Duration(tmNum) * time.Millisecond
 }
